@@ -68,6 +68,8 @@ FastAPI и Uvicorn отвечают за маршрутизацию, разбо�
 
 `POST /sync` — единственный явный способ обновить checkout данных; сервис не планирует синхронизацию, не выполняет повторных попыток и не запускает её в фоне. Периодичность синхронизации задаёт среда развёртывания. Синхронизация не обновляет исполняемый код: после изменений в `server/` или `scripts/cashbacks.py` пересоберите образ и перезапустите процесс в среде развёртывания.
 
+Ответ `503 {"detail":"sync_failed"}` сообщает только о сбое синхронизации. Конкретная причина записывается в stderr с префиксом `cashbacks-service: sync failed:`; в Docker смотрите журнал контейнера: `docker logs <container>`.
+
 ### Проверка сервера
 
 Из корня репозитория выполните:
@@ -139,6 +141,8 @@ For `POST /banks/{positive-id}/categories/match`, the service and strict source 
 
 
 `POST /sync` is the only explicit data-checkout refresh; the service does not schedule, retry, or run synchronization in the background. The backend deployment chooses the sync cadence. Sync does not update executable code: after changing `server/` or `scripts/cashbacks.py`, rebuild the image and restart the process in the deployment.
+
+The `503 {"detail":"sync_failed"}` response only indicates that synchronization failed. The specific cause is written to stderr with the `cashbacks-service: sync failed:` prefix; in Docker, inspect the container logs with `docker logs <container>`.
 
 ### Server verification
 

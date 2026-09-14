@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from urllib.parse import quote
 
 import uvicorn
 
@@ -1582,11 +1583,23 @@ class SynchronizationTest(unittest.TestCase):
         repository = TemporaryRepository(self)
         state, checkout = repository.cloned_state()
         old = state.snapshot()
-        (repository.categories / "Fuel.json").write_text("{", encoding="utf-8")
+        (repository.categories / "Fuel.json").write_text(
+            '{"category":\n  }\n', encoding="utf-8"
+        )
         repository.commit("invalid candidate")
         repository.push()
-        self.assertIsNone(state.sync())
-        self.assertEqual(state.snapshot(), old)
+        diagnostics = io.StringIO()
+        with running_server(state) as port:
+            with contextlib.redirect_stderr(diagnostics):
+                status, _, payload = request(port, "POST", "/sync")
+            self.assertEqual((status, json.loads(payload)), (503, {"detail": "sync_failed"}))
+            status, _, payload = request(port, "GET", f"/banks/{BANK_ID}/categories")
+            self.assertEqual(
+                (status, json.loads(payload)),
+                (200, json.loads(old.banks[BANK_ID].categories_body)),
+            )
+        self.assertIn(f"src/Bank-ru_{BANK_ID}/categories/Fuel.json", diagnostics.getvalue())
+        self.assertRegex(diagnostics.getvalue(), r"(?::2:3\b|\bline\s+2\b.*\bcolumn\s+3\b)")
 
         candidate = repository.update_fuel("Travel")
         state._git = FailAfterCleanupGit(repo_worker.GitRunner(30))
@@ -1595,6 +1608,66 @@ class SynchronizationTest(unittest.TestCase):
         self.assertEqual(run_git("rev-parse", "HEAD", cwd=checkout), old.revision)
         self.assertEqual(state.sync(), candidate)
         self.assertEqual(category_for_mcc(state.snapshot()), "Travel")
+
+    def test_sync_diagnostics_redact_credentials_through_exception_chain(self):
+        repository = TemporaryRepository(self)
+        token = "sync-test-token:/?@%"
+        encoded_token = quote(token, safe="")
+        username = "sync-test-user-9f4d"
+        password = "sync-test-password-2a7c"
+        repository_url = f"https://{username}:{password}@example.invalid/private.git"
+        config = repository.config(
+            checkout=repository.root / "checkout", github_token=token
+        )
+        checkout, snapshot = repo_worker.bootstrap_checkout(config)
+        state = repo_worker.ServiceState(config, checkout, snapshot)
+        failure_message = f"{token} {encoded_token} {repository_url}"
+
+        def fail_load_repository(_checkout):
+            try:
+                raise OSError(failure_message)
+            except OSError as exc:
+                raise cashbacks.DataError("source loading rejected") from exc
+
+        diagnostics = io.StringIO()
+        with mock.patch.object(
+            cashbacks, "load_repository", side_effect=fail_load_repository
+        ), contextlib.redirect_stderr(diagnostics):
+            self.assertIsNone(state.sync())
+        diagnostic = diagnostics.getvalue()
+        self.assertIn("source loading rejected", diagnostic)
+        self.assertIn("example.invalid/private.git", diagnostic)
+        self.assertFalse(
+            any(secret in diagnostic for secret in (token, encoded_token, username, password)),
+            "sync diagnostics leaked credentials",
+        )
+
+    def test_sync_reports_dirty_or_diverged_checkout_without_replacing_snapshot(self):
+        for checkout_change in ("dirty", "diverged"):
+            with self.subTest(checkout_change=checkout_change):
+                repository = TemporaryRepository(self)
+                state, checkout = repository.cloned_state()
+                old = state.snapshot()
+                if checkout_change == "dirty":
+                    (checkout / "local-only").write_text("preserve", encoding="utf-8")
+                else:
+                    run_git(
+                        "-c", "user.name=Cashbacks Test",
+                        "-c", "user.email=cashbacks@example.invalid",
+                        "commit", "--allow-empty", "-m", "diverged checkout",
+                        cwd=checkout,
+                    )
+                diagnostics = io.StringIO()
+                with running_server(state) as port:
+                    with contextlib.redirect_stderr(diagnostics):
+                        status, _, payload = request(port, "POST", "/sync")
+                self.assertEqual(
+                    (status, json.loads(payload)), (503, {"detail": "sync_failed"})
+                )
+                self.assertRegex(
+                    diagnostics.getvalue(), r"(?i)checkout.*(?:clean|revision|diverg)"
+                )
+                self.assertEqual(state.snapshot(), old)
 
     def test_activation_failure_rolls_back_or_latches_reconciliation(self):
         for rollback_fails in (False, True):

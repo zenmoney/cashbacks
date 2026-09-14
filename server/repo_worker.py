@@ -9,8 +9,10 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
+import traceback
 from typing import Sequence
 from urllib.parse import quote
 import uuid
@@ -586,16 +588,32 @@ class ServiceState:
             return False
         return _verify_checkout_revision(self._git, self.checkout, revision)
 
+    def _report_sync_failure(self, detail: str) -> None:
+        token = self.config.github_token or ""
+        print(
+            _redact_git_value(
+                f"cashbacks-service: sync failed: {detail}",
+                (token, quote(token, safe="")),
+            ),
+            file=sys.stderr,
+        )
+
     def sync(self) -> str | None:
         if self._is_shutting_down():
+            self._report_sync_failure("shutdown is in progress")
             return None
         with self._sync_lock:
             if self._is_shutting_down():
+                self._report_sync_failure("shutdown is in progress")
                 return None
             previous = self.snapshot()
             if not _verify_checkout_revision(
                 self._git, self.checkout, previous.revision
             ):
+                self._report_sync_failure(
+                    "checkout is not clean at the published revision "
+                    "or could not be verified"
+                )
                 return None
             if self.reconciliation_required:
                 self._set_reconciliation_required(False)
@@ -637,9 +655,15 @@ class ServiceState:
                 StartupError,
                 cashbacks.DataError,
                 SyncFailure,
-            ):
+            ) as exc:
                 if activation_started and not self._restore(previous.revision):
                     self._set_reconciliation_required(True)
+                    self._report_sync_failure(
+                        "rollback failed; checkout requires reconciliation"
+                    )
+                self._report_sync_failure(
+                    "".join(traceback.format_exception(exc)).rstrip()
+                )
                 return None
             finally:
                 if private_ref is not None:
