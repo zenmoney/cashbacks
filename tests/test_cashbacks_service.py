@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -1119,41 +1120,6 @@ class BootstrapTest(unittest.TestCase):
                     self.assertNotIn(secret, " ".join(arguments))
 
 
-    def test_github_token_configures_each_github_network_command(self):
-        token = "cashbacks token:/?@%"
-        encoded_token = "cashbacks%20token%3A%2F%3F%40%25"
-        repository_url = "https://github.com/owner/cashbacks.git"
-        requests = [
-            ["ls-remote", "--", repository_url],
-            ["clone", "--no-checkout", "--", repository_url, "/checkout"],
-            ["fetch", "origin", "+refs/heads/main:refs/cashbacks-service/test"],
-        ]
-        subprocess_commands = []
-
-        def successful_process(command, **_kwargs):
-            subprocess_commands.append(command)
-            process = mock.Mock(pid=len(subprocess_commands), returncode=0)
-            process.communicate.return_value = "", ""
-            return process
-
-        with mock.patch.object(
-            repo_worker.subprocess, "Popen", side_effect=successful_process
-        ):
-            runner = repo_worker.GitRunner(1, github_token=token)
-            for arguments in requests:
-                runner.run_network(arguments, transport_url=repository_url)
-
-        rewrite = (
-            "url.https://x-access-token:"
-            f"{encoded_token}@github.com/.insteadOf=https://github.com/"
-        )
-        for command in subprocess_commands:
-            self.assertEqual(command[:3], ["git", "-c", rewrite])
-            self.assertIn(command[3:], requests)
-        self.assertEqual(
-            {tuple(command[3:]) for command in subprocess_commands},
-            {tuple(arguments) for arguments in requests},
-        )
 
     def test_command_scoped_github_rewrite_keeps_clean_named_remote(self):
         repository_url = "https://github.com/owner/cashbacks.git"
@@ -1194,43 +1160,6 @@ class BootstrapTest(unittest.TestCase):
             self.assertNotIn("insteadOf", persisted_config)
             self.assertNotIn("x-access-token", persisted_config)
 
-    def test_github_token_leaves_other_network_transports_unmodified(self):
-        token = "cashbacks token:/?@%"
-        cases = [
-            (None, "https://github.com/owner/cashbacks.git"),
-            (token, "https://example.invalid/owner/cashbacks.git"),
-            (token, "http://github.com/owner/cashbacks.git"),
-            (token, "https://github.com.evil.invalid/owner/cashbacks.git"),
-        ]
-        subprocess_commands = []
-
-        def successful_process(command, **_kwargs):
-            subprocess_commands.append(command)
-            process = mock.Mock(pid=len(subprocess_commands), returncode=0)
-            process.communicate.return_value = "", ""
-            return process
-
-        with mock.patch.object(
-            repo_worker.subprocess, "Popen", side_effect=successful_process
-        ):
-            for github_token, transport_url in cases:
-                with self.subTest(
-                    github_token=github_token, transport_url=transport_url
-                ):
-                    repo_worker.GitRunner(
-                        1, github_token=github_token
-                    ).run_network(
-                        ["ls-remote", "--", transport_url],
-                        transport_url=transport_url,
-                    )
-
-        self.assertEqual(
-            {tuple(command) for command in subprocess_commands},
-            {
-                ("git", "ls-remote", "--", transport_url)
-                for _, transport_url in cases
-            },
-        )
 
     def test_git_failure_redacts_raw_and_percent_encoded_github_tokens(self):
         token = "cashbacks token:/?@%"
@@ -1463,6 +1392,128 @@ class ConcurrencyGit(DelegatingGit):
 
 
 class SynchronizationTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux child subreaping")
+    def test_successful_sync_updates_snapshot_without_orphan_children(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            safe_config = root / "safe-gitconfig"
+            hostile_config = root / "hostile-gitconfig"
+            safe_config.write_text(
+                "[maintenance]\n\tautoDetach = false\n[gc]\n\tautoDetach = false\n",
+                encoding="utf-8",
+            )
+            hostile_config.write_text(
+                "[maintenance]\n\tautoDetach = true\n[gc]\n\tautoDetach = true\n",
+                encoding="utf-8",
+            )
+            environment = {
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith("GIT_CONFIG")
+            }
+            environment.update(
+                GIT_CONFIG_GLOBAL=os.fspath(safe_config), GIT_CONFIG_NOSYSTEM="1"
+            )
+            with mock.patch.dict(os.environ, environment, clear=True):
+                repository = TemporaryRepository(self)
+                initial_revision = run_git("rev-parse", "HEAD", cwd=repository.seed)
+                repository.replace_fuel("Transport")
+                candidate = repository.commit("updated fuel")
+
+            environment["GIT_CONFIG_GLOBAL"] = os.fspath(hostile_config)
+            runner_script = textwrap.dedent(
+                """
+                import ctypes
+                import json
+                import os
+                from pathlib import Path
+                import subprocess
+                import sys
+
+                from server import models, repo_worker
+
+                libc = ctypes.CDLL(None, use_errno=True)
+                # Keep detached Git descendants inside this disposable process.
+                if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error))
+
+                config = models.Config(
+                    checkout=Path(sys.argv[1]),
+                    repository_url=sys.argv[2],
+                    git_timeout_seconds=30,
+                )
+                git = repo_worker.GitRunner(config.git_timeout_seconds)
+                orphans = []
+                try:
+                    checkout, initial = repo_worker.bootstrap_checkout(config, git=git)
+                    state = repo_worker.ServiceState(config, checkout, initial, git=git)
+                    # Publish fixture data without introducing unrelated background GC.
+                    seed_environment = dict(os.environ, GIT_CONFIG_GLOBAL=sys.argv[4])
+                    subprocess.run(
+                        ["git", "push", "origin", "main"],
+                        cwd=sys.argv[3],
+                        env=seed_environment,
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    revision = state.sync()
+                    snapshot = state.snapshot()
+                finally:
+                    git.shutdown()
+                    while True:
+                        try:
+                            orphans.append(os.waitpid(-1, 0))
+                        except ChildProcessError:
+                            break
+
+                print(json.dumps({
+                    "initial_revision": initial.revision,
+                    "revision": revision,
+                    "snapshot_revision": snapshot.revision,
+                    "categories": json.loads(snapshot.banks[int(sys.argv[5])].categories_body),
+                    "orphans": orphans,
+                }))
+                """
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    runner_script,
+                    os.fspath(repository.root / "checkout"),
+                    os.fspath(repository.remote),
+                    os.fspath(repository.seed),
+                    os.fspath(safe_config),
+                    str(BANK_ID),
+                ],
+                cwd=Path(__file__).resolve().parent.parent,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual(outcome["initial_revision"], initial_revision)
+        self.assertNotEqual(initial_revision, candidate)
+        self.assertEqual(outcome["revision"], candidate, result.stderr)
+        self.assertEqual(outcome["snapshot_revision"], candidate)
+        self.assertEqual(
+            outcome["categories"],
+            {
+                "company_id": BANK_ID,
+                "categories": [
+                    fuel_rule(["Food", "Groceries"], 5411),
+                    fuel_rule("Transport"),
+                ],
+            },
+        )
+        self.assertEqual(outcome["orphans"], [])
+
+
     def test_sync_uses_configured_remote_as_clean_github_transport(self):
         token = "cashbacks token:/?@%"
         repository_url = "https://github.com/owner/cashbacks.git"

@@ -1,7 +1,7 @@
 FROM python:3.13-slim
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y git \
+    && apt-get install --no-install-recommends -y git tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 cashbacks \
     && useradd --uid 10001 --gid cashbacks --no-create-home --shell /usr/sbin/nologin cashbacks \
@@ -21,4 +21,4 @@ WORKDIR /app
 EXPOSE 8080
 ENV CHECKOUT_DIR=/checkout
 
-ENTRYPOINT ["python3", "-m", "server.app"]
+ENTRYPOINT ["/usr/bin/tini", "--", "python3", "-m", "server.app"]

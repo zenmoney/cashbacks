@@ -156,19 +156,26 @@ class GitRunner:
         transport_url: str | None,
     ) -> subprocess.CompletedProcess[str]:
         clean_command = ["git", *arguments]
-        command = clean_command
+        # Keep automatic maintenance in the process group we wait for. Detached
+        # helpers become orphan zombies when the service is container PID 1.
+        command = [
+            "git",
+            "-c",
+            "maintenance.autoDetach=false",
+            "-c",
+            "gc.autoDetach=false",
+        ]
         if (
             self._encoded_github_token is not None
             and transport_url is not None
             and transport_url.startswith("https://github.com/")
         ):
-            command = [
-                "git",
+            command.extend([
                 "-c",
                 "url.https://x-access-token:"
                 f"{self._encoded_github_token}@github.com/.insteadOf=https://github.com/",
-                *arguments,
-            ]
+            ])
+        command.extend(arguments)
         process: subprocess.Popen[str] | None = None
         completed = False
         try:

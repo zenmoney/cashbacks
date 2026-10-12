@@ -68,6 +68,8 @@ FastAPI и Uvicorn отвечают за маршрутизацию, разбо�
 
 `POST /sync` — единственный явный способ обновить checkout данных; сервис не планирует синхронизацию, не выполняет повторных попыток и не запускает её в фоне. Периодичность синхронизации задаёт среда развёртывания. Синхронизация не обновляет исполняемый код: после изменений в `server/` или `scripts/cashbacks.py` пересоберите образ и перезапустите процесс в среде развёртывания.
 
+Все команды Git получают параметры `maintenance.autoDetach=false` и `gc.autoDetach=false`, действующие только на время команды; настройки репозитория и глобальная конфигурация Git не меняются. Автоматическое обслуживание и сборка мусора остаются включёнными, но выполняются синхронно и входят в `GIT_TIMEOUT_SECONDS`. Это предотвращает накопление zombie-процессов от фонового автообслуживания после успешного `fetch`. Образ запускает Tini как PID 1: он пересылает сигналы приложению и забирает статусы завершения осиротевших процессов, в том числе после тайм-аутов Git. Дополнительные Docker `--init` и Compose `init: true` не требуются. Для применения нужно пересобрать образ и пересоздать контейнер.
+
 Ответ `503 {"detail":"sync_failed"}` сообщает только о сбое синхронизации. Конкретная причина записывается в stderr с префиксом `cashbacks-service: sync failed:`; в Docker смотрите журнал контейнера: `docker logs <container>`.
 
 ### Проверка сервера
@@ -141,6 +143,8 @@ For `POST /banks/{positive-id}/categories/match`, the service and strict source 
 
 
 `POST /sync` is the only explicit data-checkout refresh; the service does not schedule, retry, or run synchronization in the background. The backend deployment chooses the sync cadence. Sync does not update executable code: after changing `server/` or `scripts/cashbacks.py`, rebuild the image and restart the process in the deployment.
+
+Every Git command receives command-scoped `maintenance.autoDetach=false` and `gc.autoDetach=false`; repository settings and global Git configuration remain unchanged. Automatic maintenance and garbage collection stay enabled, but run synchronously within `GIT_TIMEOUT_SECONDS`. This prevents zombie accumulation from detached automatic maintenance after successful fetches. The image runs Tini as PID 1 to forward signals to the application and reap orphaned processes, including those left after Git timeouts. Additional Docker `--init` or Compose `init: true` settings are not required. Rebuild the image and recreate the container to apply these changes.
 
 The `503 {"detail":"sync_failed"}` response only indicates that synchronization failed. The specific cause is written to stderr with the `cashbacks-service: sync failed:` prefix; in Docker, inspect the container logs with `docker logs <container>`.
 
