@@ -1,5 +1,6 @@
 {
   "category": "Аренда авто",
+  "unified_category": "Аренда авто и каршеринг",
   "include_mcc": [
     3351,
     3352,
