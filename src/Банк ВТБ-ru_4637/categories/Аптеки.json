@@ -3,6 +3,7 @@
   "unified_category": "Аптеки",
   "include_mcc": [
     5122,
+    5292,
     5912
   ]
 }
