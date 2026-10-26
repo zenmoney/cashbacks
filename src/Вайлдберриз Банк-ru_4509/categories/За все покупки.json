@@ -1,5 +1,6 @@
 {
   "category": "За все покупки",
+  "unified_category": "Все покупки",
   "exclude_mcc": [
     15,
     20,

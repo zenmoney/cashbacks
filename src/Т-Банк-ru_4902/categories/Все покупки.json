@@ -2,6 +2,7 @@
   "category": "Все покупки",
   "unified_category": "Все покупки",
   "exclude_mcc": [
+    5,
     15,
     20,
     4722,
