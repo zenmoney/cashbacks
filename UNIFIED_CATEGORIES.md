@@ -5,6 +5,7 @@ Public bank sources substantiate source categories and MCCs. `unified_category` 
 Titles are stored only in the source JSON files' `unified_category` fields. Each run rebuilds an index of those values; it does not generate names. There is no separately maintained dictionary.
 
 - For `include_mcc`, inherit a title only from an exactly equal MCC set in another bank with a stored `unified_category`. All populated titles for that set must agree, including rules in the target bank. Text similarity, subsets, and the 90% heuristic are not used.
+- Platform-ecosystem MCCs 3990 (Yandex), 3991 (Sber), and 3992 are ignored when comparing `include_mcc` sets: sets are compared after removing them, so a 5-code set matches the same 5 codes plus any of 3990–3992. A rule whose set consists only of ecosystem MCCs does not participate in matching and can neither inherit nor donate a title.
 - For `exclude_mcc`, use `Все покупки` regardless of the exclusion list.
 - Without an established title, leave the field absent. A new exact cross-bank cluster can receive a title once through review, recorded in the relevant JSON files. Rules without a shared cluster do not need an invented title.
 - Different MCC sets may share a unified title. Titles are not MCC-set identities.

@@ -19,6 +19,20 @@ else:
 
 ALL_PURCHASES = "Все покупки"
 
+#: Platform-ecosystem MCCs ignored when comparing `include_mcc` sets
+#: (Yandex 3990, Sber 3991, 3992). See UNIFIED_CATEGORIES.md.
+ECOSYSTEM_MCC = frozenset({3990, 3991, 3992})
+
+
+def comparable_mcc(mcc: Sequence[int]) -> frozenset[int] | None:
+    """The include set used for matching, with ecosystem MCCs removed.
+
+    Returns None when nothing remains; such rules do not participate in
+    matching, so an ecosystem-only set never matches another one.
+    """
+    reduced = frozenset(mcc) - ECOSYSTEM_MCC
+    return reduced if reduced else None
+
 
 @dataclass(frozen=True)
 class Rule:
@@ -64,7 +78,9 @@ def plan_changes(rules: list[Rule], banks: set[str]) -> dict[str, Any]:
     by_mcc: dict[frozenset[int], list[Rule]] = defaultdict(list)
     for rule in rules:
         if "include_mcc" in rule.entry:
-            by_mcc[frozenset(rule.entry["include_mcc"])].append(rule)
+            key = comparable_mcc(rule.entry["include_mcc"])
+            if key is not None:
+                by_mcc[key].append(rule)
 
     conflicts = []
     conflicting_mcc = set()
@@ -100,8 +116,8 @@ def plan_changes(rules: list[Rule], banks: set[str]) -> dict[str, Any]:
                 })
             continue
 
-        mcc = frozenset(rule.entry["include_mcc"])
-        if mcc in conflicting_mcc or rule.title is not None:
+        mcc = comparable_mcc(rule.entry["include_mcc"])
+        if mcc is None or mcc in conflicting_mcc or rule.title is not None:
             continue
         donors = [
             member for member in by_mcc[mcc]
